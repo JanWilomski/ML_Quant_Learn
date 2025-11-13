@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from tensorflow.keras import layers
+from tqdm import tqdm
 
 
 
@@ -152,10 +153,6 @@ env = TradingEnvironment(train_data, initial_balance=10000)
 def build_dqn_model(state_size=5, action_size=3):
     model = keras.Sequential()
 
-    # TODO: dodaj warstwy
-    # Hidden layer 1: Dense(64, activation='relu', input_dim=state_size)
-    # Hidden layer 2: Dense(32, activation='relu')
-    # Output layer: Dense(action_size, activation='linear')
     model.add(layers.Dense(64, activation='relu', input_dim=state_size))
     model.add(layers.Dense(32, activation='relu'))
     model.add(layers.Dense(action_size, activation='linear'))
@@ -164,8 +161,6 @@ def build_dqn_model(state_size=5, action_size=3):
     return model
 
 model = build_dqn_model()
-model.summary()
-
 
 class SimpleDQNAgent:
     def __init__(self, state_size=5, action_size=3, learning_rate=0.001, gamma=0.95):
@@ -224,26 +219,32 @@ env = TradingEnvironment(train_data, initial_balance=10000)
 episodes = 100
 rewards_history = []
 
+
+
 for episode in range(episodes):
     state = env.reset()
     total_reward = 0
     done = False
 
-    while not done:
-        action = agent.act(state)
-        next_state, reward, done, info = env.step(action)
+    # Stwórz progress bar dla kroków w tym episode
+    with tqdm(total=len(train_data), desc=f"Episode {episode + 1}/{episodes}", colour='White') as pbar:
+        while not done:
+            action = agent.act(state)
+            next_state, reward, done, info = env.step(action)
 
-        if not done:
-            agent.train(state, action, reward, next_state, done)
-            state = next_state
+            if not done:
+                agent.train(state, action, reward, next_state, done)
+                state = next_state
 
-        total_reward += reward
+            total_reward += reward
+            pbar.update(1)  # Aktualizuj pasek co krok
+
+            # Opcjonalnie pokaż aktualny reward w pasku
+            pbar.set_postfix({'reward': f'{total_reward:.2f}', 'balance': f'{info["balance"]:.2f}'})
 
     rewards_history.append(total_reward)
+    print(f"Episode {episode + 1} zakończony - Total Reward: {total_reward:.2f}")
 
-    if episode % 10 == 0:
-        print(
-            f"Episode {episode}/{episodes}, Total Reward: {total_reward:.2f}, Epsilon: {agent.epsilon:.3f}, Final Balance: {info['balance']:.2f}")
 
 # Wykres
 plt.plot(rewards_history)
@@ -251,3 +252,50 @@ plt.title('Total Reward per Episode')
 plt.xlabel('Episode')
 plt.ylabel('Total Reward')
 plt.show()
+
+# Test na danych z 2025
+
+
+test_data = df[df.index.year == 2025][['Zamkniecie']].copy()
+test_env = TradingEnvironment(test_data, initial_balance=10000)
+
+# Reset i testuj (BEZ treningu!)
+state = test_env.reset()
+done = False
+test_reward = 0
+
+# Wyłącz exploration (agent używa tylko tego czego się nauczył)
+agent.epsilon = 0.0  # ← WAŻNE: epsilon=0 = nie losuj, używaj najlepszych Q
+
+print(f"\n{'=' * 50}")
+print("TEST NA DANYCH 2025")
+print(f"{'=' * 50}")
+
+# Sprawdź Q-wartości dla pierwszego state z 2025
+first_state = test_env.reset()
+q_values = agent.model.predict(first_state.reshape(1, -1), verbose=0)[0]
+
+print("\nQ-wartości dla pierwszego dnia 2025:")
+print(f"HOLD: {q_values[0]:.2f}")
+print(f"BUY:  {q_values[1]:.2f}")
+print(f"SELL: {q_values[2]:.2f}")
+print(f"Agent wybiera akcję: {np.argmax(q_values)} ({'HOLD' if np.argmax(q_values)==0 else 'BUY' if np.argmax(q_values)==1 else 'SELL'})")
+
+with tqdm(total=len(test_data), desc="Testing on 2025") as pbar:
+    while not done:
+        action = agent.act(state)  # ← Tylko ACT, BEZ train()!
+        next_state, reward, done, info = test_env.step(action)
+
+        if not done:
+            state = next_state
+
+        test_reward += reward
+        pbar.update(1)
+        pbar.set_postfix({'reward': f'{test_reward:.2f}', 'balance': f'{info["balance"]:.2f}'})
+
+print(f"\n{'=' * 50}")
+print(f"TEST ZAKOŃCZONY")
+print(f"Final Balance: {info['balance']:.2f}")
+print(f"Total Profit: {info['total_profit']:.2f}")
+print(f"Total Reward: {test_reward:.2f}")
+print(f"{'=' * 50}")
