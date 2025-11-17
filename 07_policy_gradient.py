@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 from tensorflow.keras import layers
 from tqdm import tqdm
 import os
+import tensorflow as tf
 
 
 
@@ -120,6 +121,20 @@ class TradingEnvironment:
             'step': self.current_step
         }
 
+        if done and self.position is not None:
+            # Zamknij automatycznie pozycję na końcu epizodu
+            current_price = self.data.iloc[self.current_step - 1]['close']  # ostatnia cena
+
+            if self.position['type'] == 'long':
+                profit_per_unit = current_price - self.position['entry_price']
+            else:  # short
+                profit_per_unit = self.position['entry_price'] - current_price
+
+            profit = profit_per_unit * self.position_size
+            self.balance += profit
+            self.total_profit += profit
+            reward = profit
+
         return next_state, reward, done, info
 
 
@@ -167,7 +182,6 @@ df['bollinger_middle'] = df_bollinger['middle_band']
 
 df.dropna(inplace=True)
 
-
 df['Sentiment'] = pd.cut(df['returns'], bins=[-100, 0, 100], labels=[0,1]).astype(int)
 
 df.dropna(inplace=True)
@@ -180,34 +194,34 @@ train_end = int(total_len * 0.70)  # 70% train
 val_end = int(total_len * 0.85)    # następne 15% val (85% - 70%)
 # Reszta (15%) to test
 
+
+
 # Podziel dane
 train_data = df.iloc[:train_end][features].copy()
 val_data = df.iloc[train_end:val_end][features].copy()
 test_data = df.iloc[val_end:][features].copy()
 
-print(f"\n{'='*50}")
-print(f"Podział danych:")
-print(f"Train: {len(train_data)} godzin ({len(train_data)/24:.1f} dni)")
-print(f"Val:   {len(val_data)} godzin ({len(val_data)/24:.1f} dni)")
-print(f"Test:  {len(test_data)} godzin ({len(test_data)/24:.1f} dni)")
-print(f"{'='*50}\n")
-
-class SimpleDQNAgent:
+class PolicyGradientAgent:
     def __init__(self, state_size=5, action_size=3, learning_rate=0.001, gamma=0.95):
         self.state_size = state_size
         self.action_size = action_size
         self.gamma = gamma  # discount factor (jak ważna jest przyszłość)
-        self.epsilon = 1.0  # exploration rate (na początku losuje)
-        self.epsilon_decay = 0.995
-        self.epsilon_min = 0.01
+
 
         self.model = self.build_model(learning_rate)
 
     def build_model(self, learning_rate):
+        # Użyj lepszej inicjalizacji wag
+        initializer = keras.initializers.GlorotUniform()
+
         model = keras.Sequential([
-            layers.Dense(64, activation='relu', input_dim=self.state_size),
-            layers.Dense(32, activation='relu'),
-            layers.Dense(self.action_size, activation='linear')
+            layers.Dense(64, activation='relu', input_dim=self.state_size,
+                         kernel_initializer=initializer),
+            layers.Dense(32, activation='relu',
+                         kernel_initializer=initializer),
+            layers.Dense(self.action_size, activation='softmax',
+                         kernel_initializer=initializer,
+                         bias_initializer=keras.initializers.Zeros())  # ← Ważne!
         ])
         model.compile(optimizer=keras.optimizers.Adam(learning_rate=learning_rate),
                       loss='mse')
@@ -215,31 +229,56 @@ class SimpleDQNAgent:
 
     def act(self, state):
         """Wybiera akcję: epsilon-greedy"""
-        if np.random.random() <= self.epsilon:
-            return np.random.randint(0, self.action_size)  # Losowa (explore)
 
-        q_values = self.model.predict(state.reshape(1, -1), verbose=0)
-        return np.argmax(q_values[0])  # Najlepsza według Q (exploit)
+        probabilities = self.model.predict(state.reshape(1, -1), verbose=0)
+        return np.random.choice(3, p=probabilities[0])
 
-    def train(self, state, action, reward, next_state, done):
-        """Uczy się z pojedynczego kroku"""
-        target = reward
-        if not done:
-            # Q-learning: target = reward + gamma * max(Q(next_state))
-            target = reward + self.gamma * np.max(
-                self.model.predict(next_state.reshape(1, -1), verbose=0)[0]
-            )
+    def train(self, states, actions, rewards):
+        """
+        Uczy się na całym epizodzie używając Policy Gradient.
 
-        # Aktualna predykcja Q
-        target_f = self.model.predict(state.reshape(1, -1), verbose=0)
-        target_f[0][action] = target  # Popraw Q dla tej akcji
+        states: lista stanów z epizodu
+        actions: lista akcji z epizodu
+        rewards: lista nagród z epizodu
+        """
+        # 1. Oblicz returns (discounted rewards)
+        returns = self.compute_returns(rewards, self.gamma)
 
-        # Trenuj
-        self.model.fit(state.reshape(1, -1), target_f, epochs=1, verbose=0)
+        # 2. Normalizacja returns (opcjonalne ale pomaga!)
+        returns = (returns - np.mean(returns)) / (np.std(returns) + 1e-8)
 
-        # Zmniejsz epsilon (mniej exploration)
-        if self.epsilon > self.epsilon_min:
-            self.epsilon *= self.epsilon_decay
+        # 3. Konwertuj na numpy arrays
+        states = np.array(states)
+        actions = np.array(actions)
+
+        # 4. Policy Gradient: zwiększ prawdopodobieństwo dobrych akcji
+        with tf.GradientTape() as tape:
+            # Przewiduj prawdopodobieństwa dla wszystkich stanów
+            action_probs = self.model(states, training=True)
+
+            # Wybierz prawdopodobieństwa TYLKO dla akcji które wykonaliśmy
+            indices = tf.range(len(actions)) * self.action_size + actions
+            action_probs_for_actions = tf.gather(tf.reshape(action_probs, [-1]), indices)
+
+            # Loss = -log(prob) * return (chcemy MAKSYMALIZOWAĆ to, więc minimalizujemy -log)
+            log_probs = tf.math.log(action_probs_for_actions + 1e-8)
+            loss = -tf.reduce_mean(log_probs * returns)
+
+        # 5. Oblicz gradienty i zaktualizuj wagi
+        gradients = tape.gradient(loss, self.model.trainable_variables)
+        self.model.optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
+
+    def compute_returns(self, rewards, gamma):
+        """Helper function - możesz dodać jako metodę w klasie"""
+        returns = []
+        running_return = 0
+
+        for i in range(len(rewards) - 1, -1, -1):
+            running_return = rewards[i] + gamma * running_return
+            returns.append(running_return)
+
+        returns.reverse()
+        return np.array(returns)
 
 
 
@@ -247,7 +286,7 @@ class SimpleDQNAgent:
 # Stwórz agenta i environment
 # Stwórz agenta
 state_size = len(features) + 4
-agent = SimpleDQNAgent(state_size=state_size, action_size=3)
+agent = PolicyGradientAgent(state_size=state_size, action_size=3)
 
 
 
@@ -258,7 +297,6 @@ agent = SimpleDQNAgent(state_size=state_size, action_size=3)
 if os.path.exists('trading_agent.keras'):
     print("Znaleziono zapisany model! Ładuję...")
     agent.model = keras.models.load_model('trading_agent.keras')
-    agent.epsilon = 0.01  # Ustaw niskie epsilon (mało exploration)
     print("✓ Model załadowany")
 
     # Pytanie: czy trenować dalej?
@@ -273,8 +311,11 @@ train_env = TradingEnvironment(train_data, initial_balance=10000)
 val_env = TradingEnvironment(val_data, initial_balance=10000)
 test_env = TradingEnvironment(test_data, initial_balance=10000)
 
+
 # Użyj train_env do testu state
 test_state = train_env.reset()
+
+
 
 
 
@@ -286,8 +327,7 @@ def test_agent(agent, env, name="Test"):
     total_reward = 0
 
     # Wyłącz exploration
-    old_epsilon = agent.epsilon
-    agent.epsilon = 0.0
+
 
     while not done:
         action = agent.act(state)
@@ -298,8 +338,6 @@ def test_agent(agent, env, name="Test"):
 
         total_reward += reward
 
-    # Przywróć epsilon
-    agent.epsilon = old_epsilon
 
     return total_reward, info['balance']
 
@@ -315,23 +353,40 @@ best_model_path = 'best_trading_agent.keras'
 rewards_history = []
 val_rewards_history = []
 
+
+
+
+
+
 for episode in range(episodes):
     state = train_env.reset()  # Użyj train_env!
+    first_probs = agent.model.predict(state.reshape(1, -1), verbose=0)[0]
+    print(f"  Prawdopodobieństwa na początku Episode: HOLD={first_probs[0]:.4f}, BUY={first_probs[1]:.4f}, SELL={first_probs[2]:.4f}")
     total_reward = 0
     done = False
 
+    states = []
+    actions = []
+    rewards = []
     with tqdm(total=len(train_data), desc=f"Episode {episode + 1}/{episodes}") as pbar:
+        action_counts = {0: 0, 1: 0, 2: 0}
         while not done:
             action = agent.act(state)
+            action_counts[action] += 1
             next_state, reward, done, info = train_env.step(action)
 
-            if not done:
-                agent.train(state, action, reward, next_state, done)
-                state = next_state
+
+            states.append(state)
+            actions.append(action)
+            rewards.append(reward)
+            state = next_state
 
             total_reward += reward
             pbar.update(1)
             pbar.set_postfix({'reward': f'{total_reward:.2f}', 'balance': f'{info["balance"]:.2f}'})
+    print(f"  Akcje: HOLD={action_counts[0]}, BUY={action_counts[1]}, SELL={action_counts[2]}")
+
+    agent.train(states, actions, rewards)
 
     rewards_history.append(total_reward)
 
@@ -373,15 +428,15 @@ print(f"\n{'=' * 50}")
 print("TEST NA DANYCH 2025")
 print(f"{'=' * 50}")
 
-# Sprawdź Q-wartości dla pierwszego state z 2025
-first_state = test_env.reset()
-q_values = agent.model.predict(first_state.reshape(1, -1), verbose=0)[0]
 
-print("\nQ-wartości dla pierwszego dnia 2025:")
-print(f"HOLD: {q_values[0]:.2f}")
-print(f"BUY:  {q_values[1]:.2f}")
-print(f"SELL: {q_values[2]:.2f}")
-print(f"Agent wybiera akcję: {np.argmax(q_values)} ({'HOLD' if np.argmax(q_values)==0 else 'BUY' if np.argmax(q_values)==1 else 'SELL'})")
+first_state = test_env.reset()
+action_probs = agent.model.predict(first_state.reshape(1, -1), verbose=0)[0]
+
+print("\nPrawdopodobieństwa akcji dla pierwszego dnia 2025:")
+print(f"HOLD: {action_probs[0]:.2f}")
+print(f"BUY:  {action_probs[1]:.2f}")
+print(f"SELL: {action_probs[2]:.2f}")
+print(f"Agent wybiera akcję: {np.argmax(action_probs)} ({'HOLD' if np.argmax(action_probs)==0 else 'BUY' if np.argmax(action_probs)==1 else 'SELL'})")
 
 with tqdm(total=len(test_data), desc="Testing on 2025") as pbar:
     while not done:
