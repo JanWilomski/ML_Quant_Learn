@@ -117,13 +117,13 @@ df['Data'] = pd.to_datetime(df['Data'])
 
 df.set_index('Data', inplace=True)
 
-df['Future_Close'] = df['Zamkniecie'].shift(-3)
-df['Future_Return'] = (df['Future_Close'] - df['Zamkniecie'])/(df['Zamkniecie'])*100
+#df['Future_Close'] = df['Zamkniecie'].shift(-3)
+#df['Future_Return'] = (df['Future_Close'] - df['Zamkniecie'])/(df['Zamkniecie'])*100
 
 
-df['Signal'] = pd.cut(df['Future_Return'], bins=[-100, -1, 1, 100], labels=[0,1,2])
+#df['Signal'] = pd.cut(df['Future_Return'], bins=[-100, -1, 1, 100], labels=[0,1,2])
 
-df.dropna(inplace=True)
+#df.dropna(inplace=True)
 
 
 df['Returns'] = df['Zamkniecie'].pct_change()*100
