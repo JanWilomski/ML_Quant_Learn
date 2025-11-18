@@ -52,19 +52,37 @@ class TradingEnvironment:
     def _get_state(self):
         """Zwraca state dla agenta"""
         current_row = self.data.iloc[self.current_step]
+        current_price = current_row['close']
 
         if self.position is not None:
             has_position = 1
             entry_price = self.position['entry_price']
-            current_price = current_row['close']
             position_pnl = current_price - entry_price
         else:
             has_position = 0
-            entry_price = 0
-            position_pnl = 0
+            entry_price = current_price  # żeby liczenie względne było stabilne
+            position_pnl = 0.0
 
-        features_array = current_row.values
-        position_info = np.array([has_position, entry_price, position_pnl, self.balance])
+        # --- NORMALIZACJA INFORMACJI O POZYCJI ---
+
+        # cena wejścia względnie do bieżącej (np. +0.5% → 0.005)
+        entry_price_rel = (entry_price / current_price) - 1.0
+
+        # PnL na 1 jednostkę jako % ceny
+        pnl_rel = position_pnl / current_price
+
+        # balans jako % zmiany względem startu (np. +5% → 0.05)
+        balance_rel = (self.balance - self.initial_balance) / self.initial_balance
+
+        # wszystko jest w okolicach [-1, 1] zamiast 10000
+        position_info = np.array([
+            has_position,
+            entry_price_rel,
+            pnl_rel,
+            balance_rel
+        ], dtype=np.float32)
+
+        features_array = current_row.values.astype(np.float32)
         state = np.concatenate([features_array, position_info])
 
         return state
@@ -183,6 +201,10 @@ class PolicyGradientAgent:
     def act(self, state, greedy=False):
         logits = self.model.predict(state.reshape(1, -1), verbose=0)[0]
         logits_scaled = logits / self.temperature
+
+        # Przytnij logity – zabezpieczenie przed ekstremami
+        logits_scaled = np.clip(logits_scaled, -5.0, 5.0)
+
         exp_logits = np.exp(logits_scaled - np.max(logits_scaled))
         probabilities = exp_logits / np.sum(exp_logits)
 
@@ -206,11 +228,11 @@ class PolicyGradientAgent:
         with tf.GradientTape() as tape:
             logits = self.model(states, training=True)
 
-            # Temperature scaling
             logits_scaled = logits / self.temperature
+            logits_scaled = tf.clip_by_value(logits_scaled, -5.0, 5.0)
 
-            # Softmax
             action_probs = tf.nn.softmax(logits_scaled, axis=-1)
+
 
             # Wybierz prawdopodobieństwa dla wykonanych akcji
             indices = tf.range(len(actions)) * self.action_size + actions
