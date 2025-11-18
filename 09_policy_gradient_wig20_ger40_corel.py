@@ -397,8 +397,10 @@ test_env = TradingEnvironment(
 
 
 def test_agent(agent, env, n_runs=3):
+    """Testuje agenta N razy i zwraca średnią (reward, balance, trade_count)"""
     rewards = []
     balances = []
+    trade_counts = []
 
     for _ in range(n_runs):
         state = env.reset()
@@ -414,9 +416,9 @@ def test_agent(agent, env, n_runs=3):
 
         rewards.append(total_reward)
         balances.append(info['balance'])
+        trade_counts.append(info.get('trade_count', 0))  # Safe get
 
-    return np.mean(rewards), np.mean(balances)
-
+    return np.mean(rewards), np.mean(balances), np.mean(trade_counts)
 
 # ============================================
 #   TRENING
@@ -424,25 +426,38 @@ def test_agent(agent, env, n_runs=3):
 
 print("Rozpoczynam trening...\n")
 
+# ============================================
+#   TRENING Z BATCH_SIZE = 10
+# ============================================
+
 episodes = 100
-best_val_reward = -float('inf')
+BATCH_SIZE = 10  # Trenuj co 10 epizodów
+MAX_EPISODE_STEPS = 300  # Zmniejsz z 500 żeby nie zabrakło RAM
+
+# Bufor na doświadczenia
+batch_states = []
+batch_actions = []
+batch_rewards = []
 
 rewards_history = []
 val_rewards_history = []
+best_val_reward = -float('inf')
 
 for episode in range(episodes):
     state = train_env.reset()
 
-    first_logits = agent.model.predict(state.reshape(1, -1), verbose=0)[0]
-    first_logits_scaled = first_logits / agent.temperature
-    first_logits_scaled = np.clip(first_logits_scaled, -2.0, 2.0)
-    exp_logits = np.exp(first_logits_scaled - np.max(first_logits_scaled))
-    first_probs = exp_logits / np.sum(exp_logits)
+    # Pokaż prawdopodobieństwa tylko co 10 epizodów (mniej clutter)
+    if (episode + 1) % BATCH_SIZE == 0:
+        first_logits = agent.model.predict(state.reshape(1, -1), verbose=0)[0]
+        first_logits_scaled = first_logits / agent.temperature
+        first_logits_scaled = np.clip(first_logits_scaled, -2.0, 2.0)
+        exp_logits = np.exp(first_logits_scaled - np.max(first_logits_scaled))
+        first_probs = exp_logits / np.sum(exp_logits)
 
-    tqdm.write(
-        f"Episode {episode + 1} - "
-        f"Prawdopodobieństwa: HOLD={first_probs[0]:.3f}, BUY={first_probs[1]:.3f}, SELL={first_probs[2]:.3f}"
-    )
+        tqdm.write(
+            f"\nBatch {(episode + 1) // BATCH_SIZE} - "
+            f"Prawdopodobieństwa: HOLD={first_probs[0]:.3f}, BUY={first_probs[1]:.3f}, SELL={first_probs[2]:.3f}"
+        )
 
     total_reward = 0.0
     done = False
@@ -454,6 +469,7 @@ for episode in range(episodes):
 
     ep_len = train_env.max_episode_steps or len(train_data)
 
+    # Zbieraj doświadczenia (BEZ treningu!)
     with tqdm(total=ep_len, desc=f"Episode {episode + 1}/{episodes}", leave=False) as pbar:
         while not done:
             action = agent.act(state)
@@ -470,28 +486,60 @@ for episode in range(episodes):
             pbar.update(1)
             pbar.set_postfix({'reward': f'{total_reward:.2f}'})
 
-    agent.train(states, actions, rewards_ep)
+    # Dodaj do bufora batch'a
+    batch_states.extend(states)
+    batch_actions.extend(actions)
+    batch_rewards.extend(rewards_ep)
+
     rewards_history.append(total_reward)
+    train_balance = last_info['balance'] if last_info else train_env.balance
+    train_trades = last_info.get('trade_count', 0) if last_info else 0
 
-    train_balance = last_info['balance'] if last_info is not None else train_env.balance
+    # TRENUJ tylko co BATCH_SIZE epizodów
+    if (episode + 1) % BATCH_SIZE == 0:
+        batch_num = (episode + 1) // BATCH_SIZE
 
-    val_reward, val_balance = test_agent(agent, val_env, n_runs=3)
-    val_rewards_history.append(val_reward)
+        tqdm.write(f"\n{'=' * 60}")
+        tqdm.write(f"🔄 BATCH {batch_num}/{episodes // BATCH_SIZE}")
+        tqdm.write(f"   Trenuję na {len(batch_states)} krokach...")
 
-    tqdm.write(f"  Akcje: HOLD={action_counts[0]}, BUY={action_counts[1]}, SELL={action_counts[2]}")
-    tqdm.write(
-        f"Episode {episode + 1} - "
-        f"Train Reward: {total_reward:.2f}, Train Balance: {train_balance:.2f}, "
-        f"Val Reward: {val_reward:.2f}, Val Balance: {val_balance:.2f}"
-    )
+        # Trenuj
+        agent.train(batch_states, batch_actions, batch_rewards)
 
-    if val_reward > best_val_reward:
-        best_val_reward = val_reward
-        agent.model.save('best_pg_wig20.keras')
-        tqdm.write(f"  ✓ Nowy najlepszy model! Val Reward: {val_reward:.2f}")
+        # Statystyki z ostatnich 10 epizodów
+        recent_rewards = rewards_history[-BATCH_SIZE:]
+        avg_reward = np.mean(recent_rewards)
 
-    # delikatny decay epsilona
-    agent.epsilon = max(0.01, agent.epsilon * 0.995)
+        tqdm.write(f"   Średni Train Reward (10 ep): {avg_reward:.2f}")
+        tqdm.write(f"   Ostatni Train Balance: {train_balance:.2f}")
+        tqdm.write(f"   Ostatnie Trades: {train_trades}")
+
+        # Wyczyść bufor
+        batch_states = []
+        batch_actions = []
+        batch_rewards = []
+
+        # Walidacja (tylko 1 run żeby przyspieszyć)
+        val_reward, val_balance, val_trades = test_agent(agent, val_env, n_runs=1)
+        val_rewards_history.append(val_reward)
+
+        tqdm.write(f"   Val Reward: {val_reward:.2f}, Balance: {val_balance:.2f}, Trades: {val_trades:.0f}")
+
+        # Zapisz najlepszy model
+        if val_reward > best_val_reward:
+            best_val_reward = val_reward
+            agent.model.save('best_arbitrage_wig20_dax.keras')
+            tqdm.write(f"   ✅ Nowy najlepszy model! Val Reward: {val_reward:.2f}")
+
+        tqdm.write(f"{'=' * 60}\n")
+
+        # Decay epsilona
+        agent.epsilon = max(0.01, agent.epsilon * 0.99)
+
+print("\n✓ Trening zakończony!")
+
+
+
 
 # ============================================
 #   WYKRESY
