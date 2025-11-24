@@ -307,7 +307,7 @@ print("\n📊 Wczytuję DAX (z poprawką formatu i czasu)...")
 
 # Wczytaj z separatorem średnik
 try:
-    dax_raw = pd.read_csv('data/ger40_m1.csv', sep=';', header=None)
+    dax_raw = pd.read_csv('data/ger40_m1.csv', sep=';', header=0)
     dax_raw.columns = ['datetime_raw', 'open', 'high', 'low', 'close', 'volume']
 
     print(f"DAX RAW: {len(dax_raw)} wierszy")
