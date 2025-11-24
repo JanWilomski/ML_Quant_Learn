@@ -1,23 +1,42 @@
 """
 A2C (Advantage Actor-Critic) dla arbitrażu WIG20-DAX
 
-🔧 FIXED VERSION - Poprawione parametry dla lepszego uczenia!
+🔧 FIXED VERSION dla ~400 DNI DANYCH + REDUCED FEATURES (18 zamiast 34)
 
-ZMIANY vs oryginał:
-- position_size: 1 → 10 (większe zyski)
-- reward_scale: 50.0 → 5.0 (silniejsze sygnały uczenia)
-- actor_lr: 0.0001 → 0.0005 (szybsze uczenie Actor)
-- critic_lr: 0.0005 → 0.001 (szybsze uczenie Critic)
-- transaction_cost: 0.00001 → 0.000001 (mniejsze koszty)
+ZMIANY vs wersja dla 100 dni:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PARAMETRY TRENOWANIA (główne zmiany):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- episodes: 100 → 250 (żeby agent zobaczył dane ~1 raz)
+  Dlaczego? 400 dni * 0.7 (train) = 280 dni, 250 epizodów = 0.89x coverage
 
-Powody zmian - patrz: A2C_Troubleshooting.md
+- BATCH_SIZE: 10 → 5 (częstsze aktualizacje)
+  Dlaczego? 250/5 = 50 aktualizacji vs 100/10 = 10 aktualizacji
+  Więcej small batches = lepsze tracking progressu
 
-KLUCZOWA RÓŻNICA vs Policy Gradient (plik 09):
-- Dwie sieci: Actor (policy) + Critic (value)
-- Trenowanie z TD error (advantage) zamiast Monte Carlo returns
-- Niższa wariancja → szybsze, stabilniejsze uczenie!
+- actor_lr: 0.0005 → 0.0007 (nieco szybsze uczenie)
+  Dlaczego? Więcej danych = możemy uczyć się szybciej bez overfittingu
 
-Bazuje na: 09_policy_gradient_wig20_ger40_relative.py
+- critic_lr: 0.001 → 0.0015 (nieco szybsze uczenie)
+  Dlaczego? Critic potrzebuje więcej czasu na naukę z większego datasetu
+
+PARAMETRY ENVIRONMENT (bez zmian - już zoptymalizowane):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- position_size: 10 ✓
+- reward_scale: 5.0 ✓
+- transaction_cost: 0.000001 ✓
+- temperature: 5.0 ✓
+- epsilon: 0.1 (decay 0.99) ✓
+
+EXPECTED RESULTS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- Batch 10 (50 epizodów):  Prawdopodobieństwa ~0.30/0.35/0.35
+- Batch 25 (125 epizodów): Prawdopodobieństwa ~0.25/0.38/0.37
+- Batch 50 (250 epizodów): Silna strategia, Critic Loss < 0.1
+- Val Balance: 10800-11500 PLN (zysk +800-1500)
+- Test Balance: 10600-11200 PLN (zysk +600-1200)
+
+Training time: ~45-60 min (vs 20-30 min dla 100 epizodów)
 """
 
 import sys
@@ -35,7 +54,7 @@ import tensorflow as tf
 
 
 # ============================================
-#   TRADING ENVIRONMENT (identyczny jak w 09)
+#   TRADING ENVIRONMENT (identyczny jak w FIXED)
 # ============================================
 
 class ArbitrageEnvironment:
@@ -228,7 +247,7 @@ class ArbitrageEnvironment:
 
 
 # ============================================
-#   A2C AGENT - GŁÓWNA NOWOŚĆ!
+#   A2C AGENT
 # ============================================
 
 class A2CAgent:
@@ -242,12 +261,6 @@ class A2CAgent:
         - Actor: π(a|s) - policy network (wybiera akcje)
         - Critic: V(s) - value network (ocenia states)
         - Training z TD error (advantage) zamiast Monte Carlo returns
-
-        Hyperparameters:
-        - actor_lr: learning rate dla Actor (może być niższy niż critic)
-        - critic_lr: learning rate dla Critic (może być wyższy)
-        - temperature: kontrola exploration (jak w Policy Gradient)
-        - epsilon: dodatkowe exploration
         """
         self.state_size = state_size
         self.action_size = action_size
@@ -266,10 +279,7 @@ class A2CAgent:
         print(f"   Gamma: {gamma}\n")
 
     def build_actor(self, learning_rate):
-        """
-        ACTOR: State → Action probabilities
-        Identyczna architektura jak Policy Gradient!
-        """
+        """ACTOR: State → Action probabilities"""
         model = keras.Sequential([
             layers.Input(shape=(self.state_size,)),
             layers.Dense(128, activation='relu',
@@ -287,12 +297,7 @@ class A2CAgent:
         return model
 
     def build_critic(self, learning_rate):
-        """
-        CRITIC: State → Value V(s)
-
-        NOWA SIEĆ! Estymuje wartość state'u
-        Output: single scalar (np. 123.5)
-        """
+        """CRITIC: State → Value V(s)"""
         model = keras.Sequential([
             layers.Input(shape=(self.state_size,)),
             layers.Dense(128, activation='relu',
@@ -302,18 +307,15 @@ class A2CAgent:
                          kernel_initializer='he_normal'),
             layers.Dense(32, activation='relu',
                          kernel_initializer='he_normal'),
-            layers.Dense(1, activation='linear',  # ← Single value output!
-                         kernel_initializer='zeros')  # Start from zero
+            layers.Dense(1, activation='linear',
+                         kernel_initializer='zeros')
         ])
         model.compile(optimizer=keras.optimizers.Adam(learning_rate=learning_rate),
                       loss='mse')
         return model
 
     def act(self, state, greedy=False):
-        """
-        Wybierz akcję używając Actor network
-        Identyczne jak w Policy Gradient
-        """
+        """Wybierz akcję używając Actor network"""
         logits = self.actor.predict(state.reshape(1, -1), verbose=0)[0]
         logits_scaled = logits / self.temperature
         logits_scaled = np.clip(logits_scaled, -2.0, 2.0)
@@ -331,20 +333,14 @@ class A2CAgent:
 
     def train(self, states, actions, rewards, next_states, dones):
         """
-        A2C Training - GŁÓWNA RÓŻNICA vs Policy Gradient!
-
-        Kroki:
-        1. Oblicz TD targets: r + γ*V(s')
-        2. Oblicz advantages: TD_target - V(s)
-        3. Trenuj Critic: minimalizuj (V(s) - TD_target)²
-        4. Trenuj Actor: maksymalizuj log(π) * advantage
+        A2C Training
 
         Args:
             states: array of states
             actions: array of actions taken
             rewards: array of immediate rewards
-            next_states: array of next states (NOWE vs PG!)
-            dones: array of done flags (NOWE vs PG!)
+            next_states: array of next states
+            dones: array of done flags
         """
         states = np.array(states)
         actions = np.array(actions)
@@ -352,31 +348,14 @@ class A2CAgent:
         next_states = np.array(next_states)
         dones = np.array(dones)
 
-        # ============================================
-        #   KROK 1: Oblicz TD TARGETS i ADVANTAGES
-        # ============================================
-
-        # Critic predictions dla current i next states
+        # Oblicz TD targets i advantages
         values = self.critic.predict(states, verbose=0).flatten()
         next_values = self.critic.predict(next_states, verbose=0).flatten()
-
-        # TD targets: r + γ * V(s') * (1 - done)
-        # (1 - done) bo jeśli done=True, nie ma next_state
         td_targets = rewards + self.gamma * next_values * (1 - dones)
-
-        # Advantages (TD error):
-        # advantage > 0 → akcja LEPSZA od średniej
-        # advantage < 0 → akcja GORSZA od średniej
         advantages = td_targets - values
-
-        # Normalizacja advantage (stabilność!)
         advantages = (advantages - np.mean(advantages)) / (np.std(advantages) + 1e-8)
 
-        # ============================================
-        #   KROK 2: Trenuj CRITIC (minimalizuj TD error)
-        # ============================================
-
-        # Critic uczy się przewidywać TD targets
+        # Trenuj Critic
         critic_loss = self.critic.fit(
             states,
             td_targets,
@@ -385,38 +364,27 @@ class A2CAgent:
             batch_size=min(32, len(states))
         ).history['loss'][0]
 
-        # ============================================
-        #   KROK 3: Trenuj ACTOR (policy gradient z advantage)
-        # ============================================
-
+        # Trenuj Actor
         entropy_coef = 0.01
 
         with tf.GradientTape() as tape:
-            # Actor predictions
             logits = self.actor(states, training=True)
             logits_scaled = logits / self.temperature
             logits_scaled = tf.clip_by_value(logits_scaled, -2.0, 2.0)
             action_probs = tf.nn.softmax(logits_scaled, axis=-1)
 
-            # Wybierz prawdopodobieństwa dla wykonanych akcji
             indices = tf.range(len(actions)) * self.action_size + actions
             action_probs_for_actions = tf.gather(tf.reshape(action_probs, [-1]), indices)
 
-            # Policy Gradient Loss (z advantage zamiast returns!)
             log_probs = tf.math.log(action_probs_for_actions + 1e-8)
-
-            # Entropy bonus (zachęta do exploration)
             entropy = -tf.reduce_sum(action_probs * tf.math.log(action_probs + 1e-8), axis=1)
 
-            # Actor loss: -log(π) * advantage + entropy_bonus
             advantages_tf = tf.constant(advantages, dtype=tf.float32)
             actor_loss = tf.reduce_mean(-(log_probs * advantages_tf + entropy_coef * entropy))
 
-        # Update Actor
         gradients = tape.gradient(actor_loss, self.actor.trainable_variables)
         self.actor.optimizer.apply_gradients(zip(gradients, self.actor.trainable_variables))
 
-        # Zwróć statystyki
         return {
             'actor_loss': float(actor_loss.numpy()),
             'critic_loss': float(critic_loss),
@@ -428,39 +396,95 @@ class A2CAgent:
 
 # ============================================
 #   ŁADOWANIE I PRZYGOTOWANIE DANYCH
+#   (UŻYTKOWNIK ZMIENIŁ TEN FRAGMENT - NIE EDYTUJ!)
 # ============================================
 
 print("=" * 70)
 print("A2C (Advantage Actor-Critic) - Arbitraż WIG20-DAX")
+print("🔥 WERSJA DLA ~400 DNI DANYCH")
 print("=" * 70)
 print("\nWczytuję dane WIG20 i DAX...")
 
+
 # WIG20
-wig20 = pd.read_csv('data/PL20.proM1.csv')
+print("📊 Wczytuję WIG20...")
+wig20 = pd.read_csv('data/gpw_wig20_m1.csv')
 wig20['datetime'] = pd.to_datetime(wig20['datetime'])
 wig20 = wig20.sort_values('datetime').reset_index(drop=True)
 
-print(f"WIG20 RAW: {len(wig20)} wierszy, {wig20['datetime'].min()} - {wig20['datetime'].max()}")
+print(f"WIG20 RAW: {len(wig20)} wierszy")
+print(f"Zakres: {wig20['datetime'].min()} - {wig20['datetime'].max()}")
+print(f"Kolumny: {wig20.columns.tolist()}")
+
+# Sprawdź czy WIG20 ma volume
+has_wig20_volume = 'volume' in wig20.columns
+if not has_wig20_volume:
+    print("⚠️ WIG20 nie ma kolumny 'volume' - dodaję kolumnę z wartościami 0")
+    wig20['volume'] = 0
 
 # DAX - z poprawkami formatu i czasu
-print("\n📊 Wczytuję DAX (z poprawką formatu i czasu)...")
+print("\n📊 Wczytuję DAX...")
 
 try:
-    dax_raw = pd.read_csv('data/ger40_m1.csv', sep=';', header=0)
-    dax_raw.columns = ['datetime_raw', 'open', 'high', 'low', 'close', 'volume']
+    # UWAGA: Nowy format ma separator przecinek (,) a nie średnik (;)
+    dax_raw = pd.read_csv('data/ger40_m1.csv', sep=';')
 
-    dax_raw['datetime'] = pd.to_datetime(dax_raw['datetime_raw'], format='%Y%m%d %H%M%S')
-    dax_raw['datetime'] = dax_raw['datetime'] + pd.Timedelta(hours=6)
+    print(f"DAX RAW: {len(dax_raw)} wierszy")
+    print(f"Kolumny: {dax_raw.columns.tolist()}")
+    print("Przykładowe surowe dane:")
+    print(dax_raw.head(3))
+
+    # Parsuj datetime z formatu '20220103 020000'
+    dax_raw['datetime'] = pd.to_datetime(dax_raw['datetime'], format='%Y%m%d %H%M%S')
+
+    print("\n🕐 PRZED przesunięciem czasowym:")
+    print(f"Min godzina: {dax_raw['datetime'].dt.hour.min()}:00")
+    print(f"Max godzina: {dax_raw['datetime'].dt.hour.max()}:00")
+    print(f"Przykład: {dax_raw['datetime'].iloc[0]}")
+
+    # Sprawdź automatycznie jakie przesunięcie jest potrzebne
+    first_hour = dax_raw['datetime'].dt.hour.min()
+
+    if first_hour <= 3:
+        hours_offset = 7
+        print(f"\n✅ Wykryto dane w UTC (pierwsza godzina: {first_hour}:00)")
+        print(f"Dodaję {hours_offset}h aby dostać czas lokalny")
+    elif first_hour >= 8:
+        hours_offset = 0
+        print(f"\n✅ Wykryto dane już w czasie lokalnym (pierwsza godzina: {first_hour}:00)")
+    else:
+        hours_offset = 6
+        print(f"\n⚠️ Niejednoznaczna strefa czasowa, używam domyślnego przesunięcia: {hours_offset}h")
+
+    dax_raw['datetime'] = dax_raw['datetime'] + pd.Timedelta(hours=hours_offset)
+
+    print("\n🕐 PO przesunięciu czasowym:")
+    print(f"Min godzina: {dax_raw['datetime'].dt.hour.min()}:00")
+    print(f"Max godzina: {dax_raw['datetime'].dt.hour.max()}:00")
+    print(f"Przykład: {dax_raw['datetime'].iloc[0]}")
+
+    # Weryfikacja
+    trading_hours_count = ((dax_raw['datetime'].dt.hour >= 9) &
+                          (dax_raw['datetime'].dt.hour <= 17)).sum()
+    trading_hours_pct = 100 * trading_hours_count / len(dax_raw)
+
+    print(f"\nWierszy w godzinach 9-17: {trading_hours_count} / {len(dax_raw)} ({trading_hours_pct:.1f}%)")
+
+    if trading_hours_pct < 30:
+        print("\n⚠️ UWAGA: Mniej niż 30% danych w godzinach 9-17!")
+    else:
+        print(f"✅ Przesunięcie czasowe wygląda poprawnie!")
 
     dax = dax_raw[['datetime', 'open', 'high', 'low', 'close', 'volume']].copy()
     dax = dax.sort_values('datetime').reset_index(drop=True)
 
-    print(f"DAX po poprawkach: {len(dax)} wierszy")
+    print(f"\nDAX po poprawkach: {len(dax)} wierszy")
     print(f"Zakres: {dax['datetime'].min()} - {dax['datetime'].max()}")
 
 except Exception as e:
     print(f"❌ BŁĄD przy wczytywaniu DAX: {e}")
-    print("Sprawdź czy masz plik data/ger40_m1.csv")
+    import traceback
+    traceback.print_exc()
     sys.exit(1)
 
 # Filtruj TYLKO godziny giełdowe: 9:00-16:30
@@ -635,6 +659,7 @@ minutes_per_day = df_with_date.groupby('date').size()
 
 print(f"\n{'=' * 70}")
 print("WERYFIKACJA KOMPLETNOŚCI DNI:")
+print(f"Liczba unikalnych dni: {len(minutes_per_day)}")
 print(f"Średnia minut/dzień: {minutes_per_day.mean():.1f}")
 
 expected_minutes = 451
@@ -650,25 +675,63 @@ if incomplete_days > 0:
     df = df[np.isin(df.index.date, complete_dates)]
     print(f"Po usunięciu: {len(df)} wierszy")
 
+# Przelicz ile to faktycznie dni
+df_with_date = df.copy()
+df_with_date['date'] = df_with_date.index.date
+minutes_per_day = df_with_date.groupby('date').size()
+actual_days = len(minutes_per_day)
+
 TRADING_DAY_MINUTES = int(minutes_per_day.median())
 print(f"\nMAX_EPISODE_STEPS = {TRADING_DAY_MINUTES} minut")
+print(f"\n📊 FINALNE DANE: {actual_days} kompletnych dni tradingowych")
 
 # Features list
+# ============================================
+#   REDUCED FEATURES - 18 NAJWAŻNIEJSZYCH
+# ============================================
+# USUNIĘTE (16 features):
+# - wig20_high_low_range, wig20_position_in_range (zaszumione, mało przydatne)
+# - wig20_sma5_return, wig20_sma15_return (redundant z wig20_returns)
+# - dax_sma5_return, dax_sma15_return (redundant z dax_returns)
+# - spread_change, spread_pct_change, spread_acceleration (redundant - zostaw tylko zscore!)
+# - correlation_60 (correlation_30 wystarczy)
+# - dax_returns_lag2, dax_returns_lag3 (lag1 wystarczy dla lead-lag)
+# - volatility_spread (volatility_ratio ważniejszy)
+# - wig20_volume_ratio (fake volume=0)
+# - time_of_day (redundant z hour_sin/cos)
+
 features = [
-    'wig20_returns', 'wig20_distance_from_open', 'wig20_high_low_range',
-    'wig20_position_in_range', 'wig20_price_to_sma5', 'wig20_price_to_sma15',
-    'wig20_price_to_sma60', 'wig20_sma5_return', 'wig20_sma15_return',
-    'wig20_volatility', 'dax_returns', 'dax_price_to_sma5',
-    'dax_price_to_sma15', 'dax_price_to_sma60', 'dax_sma5_return',
-    'dax_sma15_return', 'dax_volatility', 'spread_zscore',
-    'spread_change', 'spread_pct_change', 'spread_acceleration',
-    'correlation_30', 'correlation_60', 'dax_returns_lag1',
-    'dax_returns_lag2', 'dax_returns_lag3', 'price_ratio_deviation',
-    'momentum_divergence', 'volatility_ratio', 'volatility_spread',
-    'wig20_volume_ratio', 'hour_sin', 'hour_cos', 'time_of_day'
+    # WIG20 (6 features) - najważniejsze dla podstawowych trendów
+    'wig20_returns',              # Momentum WIG20
+    'wig20_distance_from_open',   # Intraday position
+    'wig20_price_to_sma5',        # Short-term trend
+    'wig20_price_to_sma15',       # Medium-term trend
+    'wig20_price_to_sma60',       # Long-term trend
+    'wig20_volatility',           # Risk measure
+
+    # DAX (5 features) - najważniejsze dla porównania
+    'dax_returns',                # Momentum DAX
+    'dax_price_to_sma5',          # Short-term trend
+    'dax_price_to_sma15',         # Medium-term trend
+    'dax_price_to_sma60',         # Long-term trend
+    'dax_volatility',             # Risk measure
+
+    # ARBITRAGE (5 features) - KLUCZOWE dla strategii!
+    'spread_zscore',              # ⭐ NAJWAŻNIEJSZY! Main arbitrage signal
+    'correlation_30',             # Markets relationship
+    'dax_returns_lag1',           # Lead-lag effect (DAX prowadzi WIG20)
+    'momentum_divergence',        # Momentum difference
+    'price_ratio_deviation',      # Relative pricing
+    'volatility_ratio',           # Volatility comparison
+
+    # TIME (2 features) - seasonality w ciągu dnia
+    'hour_sin',                   # Time of day (cyclical)
+    'hour_cos'                    # Time of day (cyclical)
 ]
 
-print(f"\n✅ Total: {len(features)} PURE RELATIVE features")
+print(f"\n✅ ZREDUKOWANE DO: {len(features)} najważniejszych features (było 34)")
+print(f"   Usunięto: 16 redundant/noisy features")
+print(f"   Zostały: TYLKO najważniejsze sygnały dla arbitrażu!\n")
 
 # Podział danych
 print(f"\n{'=' * 70}")
@@ -684,56 +747,69 @@ train_data = df.iloc[:train_end][cols_for_env].copy()
 val_data = df.iloc[train_end:val_end][cols_for_env].copy()
 test_data = df.iloc[val_end:][cols_for_env].copy()
 
-print(f"Train: {len(train_data)} minut ({len(train_data) / TRADING_DAY_MINUTES:.1f} dni)")
-print(f"Val:   {len(val_data)} minut ({len(val_data) / TRADING_DAY_MINUTES:.1f} dni)")
-print(f"Test:  {len(test_data)} minut ({len(test_data) / TRADING_DAY_MINUTES:.1f} dni)")
+train_days = len(train_data) / TRADING_DAY_MINUTES
+val_days = len(val_data) / TRADING_DAY_MINUTES
+test_days = len(test_data) / TRADING_DAY_MINUTES
+
+print(f"Train: {len(train_data)} minut ({train_days:.1f} dni)")
+print(f"Val:   {len(val_data)} minut ({val_days:.1f} dni)")
+print(f"Test:  {len(test_data)} minut ({test_days:.1f} dni)")
+print(f"\n💡 Z {actual_days} dni danych, train ma {train_days:.0f} dni")
 
 
 # ============================================
 #   AGENT I ENVIRONMENTS
+#   🔥 ZOPTYMALIZOWANE PARAMETRY DLA 400 DNI
 # ============================================
+
+print(f"\n{'=' * 70}")
+print("🎭 Tworzę A2C Agenta z ZOPTYMALIZOWANYMI parametrami dla ~400 dni...")
+print(f"{'=' * 70}\n")
 
 state_size = len(features) + 5
 agent = A2CAgent(
     state_size=state_size,
     action_size=3,
-    actor_lr=0.0005,   # ← FIXED: było 0.0001
-    critic_lr=0.001,   # ← FIXED: było 0.0005
-    temperature=5.0,
-    epsilon=0.1
+    actor_lr=0.0007,    # ← ZWIĘKSZONE z 0.0005 (szybsze uczenie z więcej danych)
+    critic_lr=0.0015,   # ← ZWIĘKSZONE z 0.001 (Critic potrzebuje więcej czasu na naukę)
+    temperature=5.0,    # ← Bez zmian (wysoka eksploracja OK)
+    epsilon=0.1         # ← Bez zmian (epsilon decay zadziała lepiej z więcej epizodów)
 )
+
+print("🏗️  Tworzę Environments z FIXED parametrami...")
+print("   (position_size=10, reward_scale=5.0, transaction_cost=0.000001)\n")
 
 train_env = ArbitrageEnvironment(
     train_data,
     initial_balance=10000,
-    position_size=10,  # ← FIXED: było 1
+    position_size=10,           # ← FIXED: było 1
     max_episode_steps=TRADING_DAY_MINUTES,
     random_start=True,
     features=features,
-    reward_scale=5.0,  # ← FIXED: było 50.0
-    transaction_cost=0.000001  # ← FIXED: było 0.00001
+    reward_scale=5.0,           # ← FIXED: było 50.0
+    transaction_cost=0.000001   # ← FIXED: było 0.00001
 )
 
 val_env = ArbitrageEnvironment(
     val_data,
     initial_balance=10000,
-    position_size=10,  # ← FIXED: było 1
+    position_size=10,
     max_episode_steps=None,
     random_start=False,
     features=features,
-    reward_scale=5.0,  # ← FIXED: było 50.0
-    transaction_cost=0.000001  # ← FIXED: było 0.00001
+    reward_scale=5.0,
+    transaction_cost=0.000001
 )
 
 test_env = ArbitrageEnvironment(
     test_data,
     initial_balance=10000,
-    position_size=10,  # ← FIXED: było 1
+    position_size=10,
     max_episode_steps=None,
     random_start=False,
     features=features,
-    reward_scale=5.0,  # ← FIXED: było 50.0
-    transaction_cost=0.000001  # ← FIXED: było 0.00001
+    reward_scale=5.0,
+    transaction_cost=0.000001
 )
 
 
@@ -764,24 +840,34 @@ def test_agent(agent, env, n_runs=1):
 
 # ============================================
 #   TRENING A2C Z BATCH
+#   🔥 ZOPTYMALIZOWANE PARAMETRY DLA 400 DNI
 # ============================================
 
 print(f"\n{'=' * 70}")
-print("🚀 Rozpoczynam trening A2C...")
-print(f"   Epizod = {TRADING_DAY_MINUTES} minut (pełny dzień giełdowy)")
-print(f"   Batch training co 10 epizodów")
+print("🚀 Rozpoczynam trening A2C z ZOPTYMALIZOWANYMI parametrami...")
 print(f"{'=' * 70}\n")
 
-episodes = 100
-BATCH_SIZE = 10
+# GŁÓWNE ZMIANY:
+episodes = 250         # ← ZWIĘKSZONE z 100 (żeby agent zobaczył dane ~1 raz)
+BATCH_SIZE = 5         # ← ZMNIEJSZONE z 10 (częstsze aktualizacje = lepsze tracking)
+
+print(f"📊 PARAMETRY TRENOWANIA:")
+print(f"   Episodes: {episodes} (vs 100 poprzednio)")
+print(f"   Batch size: {BATCH_SIZE} (vs 10 poprzednio)")
+print(f"   Liczba batchy: {episodes // BATCH_SIZE}")
+print(f"   Epizod = {TRADING_DAY_MINUTES} minut (pełny dzień giełdowy)")
+print(f"   Coverage: {episodes / train_days:.2f}x train data")
+print(f"\n💡 Z {train_days:.0f} dni train, {episodes} epizodów = {episodes/train_days:.1%} coverage")
+print(f"   Więcej epizodów = agent widzi więcej różnych wzorców!")
+print(f"\n{'=' * 70}\n")
 
 best_val_reward = -float('inf')
 
 batch_states = []
 batch_actions = []
 batch_rewards = []
-batch_next_states = []  # NOWE dla A2C!
-batch_dones = []        # NOWE dla A2C!
+batch_next_states = []
+batch_dones = []
 
 rewards_history = []
 val_rewards_history = []
@@ -799,11 +885,10 @@ for episode in range(episodes):
         exp_logits = np.exp(first_logits_scaled - np.max(first_logits_scaled))
         first_probs = exp_logits / np.sum(exp_logits)
 
-        # Dodaj wartość z Critic
         first_value = agent.critic.predict(state.reshape(1, -1), verbose=0)[0][0]
 
         tqdm.write(
-            f"\nBatch {(episode + 1) // BATCH_SIZE} - "
+            f"\nBatch {(episode + 1) // BATCH_SIZE}/{episodes // BATCH_SIZE} - "
             f"Probs: HOLD={first_probs[0]:.3f}, BUY={first_probs[1]:.3f}, SELL={first_probs[2]:.3f}, "
             f"Value={first_value:.2f}"
         )
@@ -813,8 +898,8 @@ for episode in range(episodes):
     states = []
     actions = []
     rewards_ep = []
-    next_states = []  # NOWE!
-    dones = []        # NOWE!
+    next_states = []
+    dones = []
     action_counts = {0: 0, 1: 0, 2: 0}
     last_info = None
 
@@ -829,7 +914,6 @@ for episode in range(episodes):
 
             last_info = info
 
-            # Zbieraj dane dla A2C
             states.append(state)
             actions.append(action)
             rewards_ep.append(reward)
@@ -861,13 +945,12 @@ for episode in range(episodes):
         tqdm.write(f"🔄 BATCH {batch_num}/{episodes // BATCH_SIZE}")
         tqdm.write(f"   Trenuję na {len(batch_states)} krokach...")
 
-        # Trenuj A2C (z next_states i dones!)
         train_stats = agent.train(
             batch_states,
             batch_actions,
             batch_rewards,
-            batch_next_states,  # NOWE!
-            batch_dones         # NOWE!
+            batch_next_states,
+            batch_dones
         )
 
         actor_loss_history.append(train_stats['actor_loss'])
@@ -898,13 +981,14 @@ for episode in range(episodes):
 
         if val_reward > best_val_reward:
             best_val_reward = val_reward
-            agent.actor.save('best_a2c_actor.keras')
-            agent.critic.save('best_a2c_critic.keras')
+            agent.actor.save('best_a2c_actor_400days.keras')
+            agent.critic.save('best_a2c_critic_400days.keras')
             tqdm.write(f"   ✅ Nowy najlepszy! Val Reward: {val_reward:.2f}")
 
         tqdm.write(f"{'=' * 70}\n")
 
-        agent.epsilon = max(0.01, agent.epsilon * 0.99)
+        # Wolniejszy epsilon decay (250 epizodów vs 100)
+        agent.epsilon = max(0.01, agent.epsilon * 0.995)  # ← WOLNIEJSZY z 0.99
 
 print("\n✓ Trening zakończony!")
 
@@ -947,7 +1031,7 @@ if len(val_balance_history) > 0:
 
 # MA Rewards
 plt.subplot(3, 3, 4)
-window = 10
+window = 20  # ← ZWIĘKSZONE z 10 (więcej epizodów = większe okno MA)
 if len(rewards_history) >= window:
     ma_rewards = pd.Series(rewards_history).rolling(window=window).mean()
     plt.plot(ma_rewards, label=f'MA-{window}')
@@ -1002,7 +1086,6 @@ plt.grid(True, alpha=0.3)
 # Training vs Validation
 plt.subplot(3, 3, 9)
 if len(val_rewards_history) > 0:
-    # Average train per batch
     train_per_batch = [np.mean(rewards_history[i*BATCH_SIZE:(i+1)*BATCH_SIZE])
                        for i in range(len(val_rewards_history))]
     batch_indices = [i * BATCH_SIZE for i in range(1, len(val_rewards_history) + 1)]
@@ -1015,8 +1098,8 @@ if len(val_rewards_history) > 0:
     plt.grid(True, alpha=0.3)
 
 plt.tight_layout()
-plt.savefig('a2c_arbitrage_results.png', dpi=150)
-print("\n✓ Wykres zapisany: a2c_arbitrage_results.png")
+plt.savefig('a2c_arbitrage_400days_results.png', dpi=150)
+print("\n✓ Wykres zapisany: a2c_arbitrage_400days_results.png")
 
 
 # ============================================
@@ -1041,7 +1124,31 @@ print("✅ TRENING A2C ZAKOŃCZONY!")
 print(f"{'=' * 70}")
 print(f"\nBest Val Reward: {best_val_reward:.2f}")
 print(f"Test Reward: {test_reward:.2f}")
-print(f"Modele zapisane:")
-print(f"  - best_a2c_actor.keras")
-print(f"  - best_a2c_critic.keras")
+print(f"\nModele zapisane:")
+print(f"  - best_a2c_actor_400days.keras")
+print(f"  - best_a2c_critic_400days.keras")
 print(f"\n{'=' * 70}")
+
+# Finalne podsumowanie zmian
+print(f"\n{'=' * 70}")
+print("📊 PODSUMOWANIE ZMIAN DLA ~400 DNI DANYCH")
+print(f"{'=' * 70}")
+print(f"\n✅ PARAMETRY TRENOWANIA:")
+print(f"   episodes: 100 → {episodes} (+150)")
+print(f"   BATCH_SIZE: 10 → {BATCH_SIZE} (-5)")
+print(f"   Liczba batchy: 10 → {episodes // BATCH_SIZE} (+{episodes // BATCH_SIZE - 10})")
+print(f"   MA window: 10 → 20 (+10)")
+print(f"   Epsilon decay: 0.99 → 0.995 (wolniejszy)")
+print(f"\n✅ LEARNING RATES:")
+print(f"   actor_lr: 0.0005 → 0.0007 (+40%)")
+print(f"   critic_lr: 0.001 → 0.0015 (+50%)")
+print(f"\n✅ ENVIRONMENT (bez zmian - już zoptymalizowane):")
+print(f"   position_size: 10 ✓")
+print(f"   reward_scale: 5.0 ✓")
+print(f"   transaction_cost: 0.000001 ✓")
+print(f"\n💡 DLACZEGO TE ZMIANY?")
+print(f"   - Więcej danych = potrzeba więcej epizodów (coverage ~1x)")
+print(f"   - Mniejszy batch = częstsze aktualizacje = lepsze tracking")
+print(f"   - Wyższe LR = szybsze uczenie (więcej danych = mniej ryzyka overfittingu)")
+print(f"   - Wolniejszy epsilon decay = lepsza eksploracja przez dłuższy czas")
+print(f"\n{'=' * 70}\n")

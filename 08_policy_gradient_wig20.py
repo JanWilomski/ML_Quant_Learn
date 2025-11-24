@@ -242,7 +242,7 @@ class PolicyGradientAgent:
 # ============================================
 
 print("Wczytuję dane WIG20...")
-df = pd.read_csv('data/wig20_h1_11_04_2024-17_11_2025.csv')
+df = pd.read_csv('data/gpw_wig20_m1.csv')
 
 df['datetime'] = pd.to_datetime(
     df['date'].astype(str) + df['time'].astype(str).str.zfill(6),
